@@ -1,41 +1,234 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import json
+import re
 from datetime import datetime
+from pathlib import Path
 from backend.services.ai_client import ai_client
 
 class ParserAgent:
     def __init__(self):
         self.ai_client = ai_client
+        self.parsers_cache_dir = Path("./data/parsers")
+        self.parsers_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def identify_format(self, file_content: str) -> Dict:
-        system_prompt = """你是一个聊天记录格式识别专家。分析用户上传的聊天记录文件内容，识别其格式并返回解析规则。
+    def parse_records(self, file_content: str, contact_id: str) -> List[Dict]:
+        """解析聊天记录，优先使用硬编码规则，失败时回退到 LLM"""
+
+        # 1. 尝试使用已缓存的解析器
+        cached_parser = self._try_cached_parsers(file_content)
+        if cached_parser:
+            try:
+                records = self._parse_with_code(file_content, cached_parser)
+                if records:
+                    print(f"✓ 使用缓存解析器成功解析 {len(records)} 条记录（零 LLM 调用）")
+                    return records
+            except Exception as e:
+                print(f"缓存解析器失败: {e}，尝试其他方法")
+
+        # 2. 尝试常见格式的内置解析器
+        builtin_records = self._try_builtin_parsers(file_content)
+        if builtin_records:
+            print(f"✓ 使用内置解析器成功解析 {len(builtin_records)} 条记录（零 LLM 调用）")
+            return builtin_records
+
+        # 3. 让 LLM 生成新的硬编码解析器
+        print("未识别格式，请求 LLM 生成解析器...")
+        generated_parser = self._generate_parser_with_llm(file_content)
+
+        if generated_parser:
+            try:
+                records = self._parse_with_code(file_content, generated_parser)
+                if records:
+                    self._cache_parser(generated_parser)
+                    print(f"✓ 使用生成的解析器成功解析 {len(records)} 条记录")
+                    return records
+            except Exception as e:
+                print(f"生成的解析器失败: {e}，回退到 LLM 直接解析")
+
+        # 4. 最后回退：让 LLM 直接解析内容
+        print("回退到 LLM 直接解析...")
+        return self._parse_with_llm(file_content)
+
+    def _try_builtin_parsers(self, content: str) -> Optional[List[Dict]]:
+        """尝试常见格式的内置解析器"""
+        parsers = [
+            self._parse_wechat_txt,
+            self._parse_wechat_html,
+            self._parse_csv,
+            self._parse_json
+        ]
+
+        for parser in parsers:
+            try:
+                records = parser(content)
+                if records and len(records) > 0:
+                    return records
+            except:
+                continue
+        return None
+
+    def _parse_wechat_txt(self, content: str) -> Optional[List[Dict]]:
+        """解析微信 TXT 导出格式
+
+        常见格式：
+        2024-01-15 10:30:25 张三
+        你好
+
+        2024-01-15 10:31:00 我
+        你好啊
+        """
+        pattern = r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(.+?)\n(.+?)(?=\n\d{4}-\d{2}-\d{2}|\Z)'
+        matches = re.findall(pattern, content, re.DOTALL)
+
+        if not matches:
+            return None
+
+        records = []
+        for timestamp_str, sender_name, message in matches:
+            sender = "user" if sender_name.strip() in ["我", "Me"] else "contact"
+            records.append({
+                "timestamp": timestamp_str.strip(),
+                "sender": sender,
+                "message": message.strip()
+            })
+
+        return records if len(records) > 0 else None
+
+    def _parse_wechat_html(self, content: str) -> Optional[List[Dict]]:
+        """解析微信 HTML 导出格式"""
+        # 简化的 HTML 解析，实际可能需要 BeautifulSoup
+        pattern = r'<div class="message">.*?<span class="time">(.+?)</span>.*?<span class="sender">(.+?)</span>.*?<div class="content">(.+?)</div>'
+        matches = re.findall(pattern, content, re.DOTALL)
+
+        if not matches:
+            return None
+
+        records = []
+        for timestamp_str, sender_name, message in matches:
+            sender = "user" if "我" in sender_name else "contact"
+            records.append({
+                "timestamp": timestamp_str.strip(),
+                "sender": sender,
+                "message": message.strip()
+            })
+
+        return records if len(records) > 0 else None
+
+    def _parse_csv(self, content: str) -> Optional[List[Dict]]:
+        """解析 CSV 格式"""
+        lines = content.strip().split('\n')
+        if len(lines) < 2:
+            return None
+
+        # 检查是否有标题行
+        header = lines[0].lower()
+        if not any(k in header for k in ['time', 'sender', 'message', '时间', '发送者', '消息']):
+            return None
+
+        records = []
+        for line in lines[1:]:
+            parts = line.split(',')
+            if len(parts) >= 3:
+                records.append({
+                    "timestamp": parts[0].strip(),
+                    "sender": "user" if parts[1].strip() in ["我", "user", "me"] else "contact",
+                    "message": ','.join(parts[2:]).strip()
+                })
+
+        return records if len(records) > 0 else None
+
+    def _parse_json(self, content: str) -> Optional[List[Dict]]:
+        """解析 JSON 格式"""
+        try:
+            data = json.loads(content)
+            if isinstance(data, list) and len(data) > 0:
+                # 检查是否已经是目标格式
+                first = data[0]
+                if all(k in first for k in ['timestamp', 'sender', 'message']):
+                    return data
+        except:
+            pass
+        return None
+
+    def _generate_parser_with_llm(self, file_content: str) -> Optional[Dict]:
+        """让 LLM 生成硬编码解析器"""
+        system_prompt = """你是一个代码生成专家。分析聊天记录格式，生成 Python 解析代码。
 
 返回 JSON 格式：
 {
-    "format_type": "格式类型（如 wechat_txt, csv, json 等）",
-    "pattern": "消息提取的正则表达式或规则描述",
-    "sample_parse": "示例解析结果"
-}"""
+    "format_name": "格式名称（如 wechat_txt_v2）",
+    "description": "格式描述",
+    "regex_pattern": "正则表达式（用于提取消息）",
+    "sample_code": "完整的 Python 解析函数代码"
+}
 
-        prompt = f"""分析以下聊天记录内容（前500字符）：
+要求：
+1. regex_pattern 必须能提取 timestamp、sender、message
+2. sample_code 必须是可执行的 Python 函数，函数名为 parse_custom
+3. 函数签名：def parse_custom(content: str) -> List[Dict]
+4. 返回格式：[{"timestamp": "...", "sender": "user/contact", "message": "..."}]"""
+
+        prompt = f"""分析以下聊天记录格式（前 1000 字符）：
 
 ```
-{file_content[:500]}
+{file_content[:1000]}
 ```
 
-请识别格式并返回解析规则。"""
+请生成解析代码。"""
 
         response = self.ai_client.generate(prompt, 'entity_extraction', system_prompt)
 
         try:
-            return json.loads(response)
-        except json.JSONDecodeError:
-            return {"format_type": "unknown", "pattern": "", "sample_parse": ""}
+            parser_def = json.loads(response)
+            if 'regex_pattern' in parser_def and 'sample_code' in parser_def:
+                return parser_def
+        except:
+            pass
+        return None
 
-    def parse_records(self, file_content: str, contact_id: str) -> List[Dict]:
-        format_info = self.identify_format(file_content)
+    def _parse_with_code(self, content: str, parser_def: Dict) -> Optional[List[Dict]]:
+        """使用生成的代码解析"""
+        try:
+            # 执行生成的代码
+            exec_globals = {"re": re, "json": json, "List": List, "Dict": Dict}
+            exec(parser_def['sample_code'], exec_globals)
 
-        system_prompt = """你是一个聊天记录解析专家。根据识别的格式规则，将聊天记录解析为统一的 JSON 格式。
+            parse_func = exec_globals.get('parse_custom')
+            if parse_func:
+                records = parse_func(content)
+                if records and len(records) > 0:
+                    return records
+        except Exception as e:
+            raise ValueError(f"代码执行失败: {e}")
+        return None
+
+    def _cache_parser(self, parser_def: Dict):
+        """缓存解析器定义"""
+        cache_file = self.parsers_cache_dir / f"{parser_def.get('format_name', 'custom')}.json"
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(parser_def, f, ensure_ascii=False, indent=2)
+
+    def _try_cached_parsers(self, content: str) -> Optional[Dict]:
+        """尝试使用缓存的解析器"""
+        if not self.parsers_cache_dir.exists():
+            return None
+
+        for cache_file in self.parsers_cache_dir.glob("*.json"):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    parser_def = json.load(f)
+
+                # 简单匹配：检查正则是否能匹配
+                pattern = parser_def.get('regex_pattern')
+                if pattern and re.search(pattern, content[:500]):
+                    return parser_def
+            except:
+                continue
+        return None
+
+    def _parse_with_llm(self, file_content: str) -> List[Dict]:
+        """最后的回退方案：让 LLM 直接解析内容"""
+        system_prompt = """你是一个聊天记录解析专家。将聊天记录解析为统一的 JSON 格式。
 
 每条消息返回格式：
 {
@@ -46,10 +239,7 @@ class ParserAgent:
 
 返回 JSON 数组。"""
 
-        prompt = f"""格式识别结果：
-{json.dumps(format_info, ensure_ascii=False, indent=2)}
-
-聊天记录内容：
+        prompt = f"""聊天记录内容：
 ```
 {file_content}
 ```
@@ -68,6 +258,6 @@ class ParserAgent:
                     raise ValueError("解析结果缺少必要字段")
             return records
         except (json.JSONDecodeError, ValueError) as e:
-            raise ValueError(f"解析失败: {str(e)}")
+            raise ValueError(f"LLM 解析失败: {str(e)}")
 
 parser_agent = ParserAgent()
