@@ -1,0 +1,41 @@
+# AI 模型配置
+# 支持多种提供商：openai_compatible（DeepSeek、Ollama、OpenAI 等）、gemini
+
+models:
+  # 画像生成（高 token 消耗，使用便宜模型）
+  profile_generation:
+    provider: "openai_compatible"  # openai_compatible 或 gemini
+    api_key: "your-deepseek-api-key"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
+    temperature: 0.7
+
+  # 实体/关系提取（LightRAG，高 token 消耗）
+  entity_extraction:
+    provider: "openai_compatible"
+    api_key: "your-deepseek-api-key"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
+    temperature: 0.3
+
+  # 推荐回复生成（使用强模型）
+  reply_generation:
+    provider: "gemini"  # 或 openai_compatible
+    api_key: "your-gemini-api-key"
+    model: "gemini-2.0-flash-exp"
+    temperature: 0.8
+
+  # Embedding 模型
+  embedding:
+    provider: "openai_compatible"
+    api_key: "your-openai-api-key"  # 或 DeepSeek API key
+    base_url: "https://api.openai.com/v1"  # 或 DeepSeek base_url
+    model: "text-embedding-3-small"
+
+# LightRAG 配置
+lightrag:
+  working_dir: "./data/lightrag"
+
+# 数据库配置
+database:
+  path: "./data/chathelper.db"
