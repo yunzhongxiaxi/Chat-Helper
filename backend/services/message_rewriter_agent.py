@@ -51,7 +51,7 @@ class MessageRewriterAgent:
 
 请分析这条消息的潜台词和真实意图。"""
 
-        response = self.ai_client.generate(prompt, 'entity_extraction', system_prompt)
+        response = self.ai_client.generate(prompt, 'reply_generation', system_prompt)
 
         try:
             result = json.loads(response)

@@ -4,7 +4,12 @@
       "Bash(npm create *)",
       "Bash(python *)",
       "Bash(git worktree *)",
-      "Bash(PYTHONIOENCODING=utf-8 python *)"
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "Bash(DASHSCOPE_API_KEY=test-key python *)",
+      "Bash(command -v uv)",
+      "Bash(uv --version)",
+      "Bash(command -v uvx)",
+      "Bash(uvx --version)"
     ]
   }
 }

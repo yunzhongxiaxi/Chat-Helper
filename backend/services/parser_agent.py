@@ -14,8 +14,22 @@ class ParserAgent:
         self.parsers_cache_dir = Path("./data/parsers")
         self.parsers_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def parse_xlsx_records(self, file_content: bytes, contact_id: str) -> List[Dict]:
+    def parse_xlsx_records(self, file_content: bytes, contact_id: str = None) -> List[Dict]:
         rows = self._read_xlsx_rows(file_content)
+        return self._parse_xlsx_rows(rows)
+
+    def parse_xlsx_metadata(self, file_content: bytes) -> Dict:
+        rows = self._read_xlsx_rows(file_content)
+        return self._parse_xlsx_metadata_rows(rows)
+
+    def parse_xlsx(self, file_content: bytes) -> Dict:
+        rows = self._read_xlsx_rows(file_content)
+        return {
+            "metadata": self._parse_xlsx_metadata_rows(rows),
+            "records": self._parse_xlsx_rows(rows)
+        }
+
+    def _parse_xlsx_rows(self, rows: List[List[str]]) -> List[Dict]:
         header_index = self._find_xlsx_header(rows)
         if header_index is None:
             raise ValueError("未找到 XLSX 聊天记录表头")
@@ -48,6 +62,22 @@ class ParserAgent:
 
         print(f"✓ 使用内置 XLSX 解析器成功解析 {len(records)} 条记录（零 LLM 调用）")
         return records
+
+    def _parse_xlsx_metadata_rows(self, rows: List[List[str]]) -> Dict:
+        metadata = {}
+        for row in rows[:10]:
+            for index, cell in enumerate(row):
+                key = cell.strip()
+                value = self._xlsx_cell(row, index + 1)
+                if key == '微信ID' and value:
+                    metadata['contact_id'] = value
+                elif key == '昵称' and value:
+                    metadata['nickname'] = value
+                elif key == '导出工具' and value:
+                    metadata['export_tool'] = value
+                elif key == '导出时间' and value:
+                    metadata['export_time'] = value
+        return metadata
 
     def _read_xlsx_rows(self, file_content: bytes) -> List[List[str]]:
         namespace = {'a': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
@@ -281,7 +311,7 @@ class ParserAgent:
 
 请生成解析代码。"""
 
-        response = self.ai_client.generate(prompt, 'entity_extraction', system_prompt)
+        response = self.ai_client.generate(prompt, 'profile_generation', system_prompt)
 
         try:
             parser_def = json.loads(response)
@@ -354,7 +384,7 @@ class ParserAgent:
 2. 如果无法确定发送者，根据上下文推断
 3. timestamp 必须是有效的日期时间格式"""
 
-        response = self.ai_client.generate(prompt, 'entity_extraction', system_prompt)
+        response = self.ai_client.generate(prompt, 'profile_generation', system_prompt)
 
         try:
             records = json.loads(response)

@@ -35,7 +35,7 @@ class AIClient:
 
         Args:
             prompt: 用户提示词
-            purpose: 用途（profile_generation, entity_extraction, reply_generation）
+            purpose: 用途（profile_generation, reply_generation, embedding）
             system_prompt: 系统提示词
             tools: Function calling 工具定义
         """
