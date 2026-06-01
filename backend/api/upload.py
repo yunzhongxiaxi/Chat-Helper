@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from typing import Optional
 from pathlib import Path
 from backend.services.parser_agent import parser_agent
 from backend.services.profile_service import create_profile_service
@@ -11,17 +12,26 @@ router = APIRouter(prefix="/api", tags=["upload"])
 @router.post("/upload")
 async def upload_chat_records(
     file: UploadFile = File(...),
-    contact_id: str = Form(...)
+    contact_id: Optional[str] = Form(None)
 ):
     try:
         content = await file.read()
         suffix = Path(file.filename or '').suffix.lower()
 
+        metadata = {}
         if suffix == '.xlsx':
-            records = parser_agent.parse_xlsx_records(content, contact_id)
+            parsed = parser_agent.parse_xlsx(content)
+            metadata = parsed['metadata']
+            records = parsed['records']
+            contact_id = contact_id or metadata.get('contact_id')
         else:
+            if not contact_id:
+                raise HTTPException(status_code=400, detail="非 XLSX 文件必须提供 contact_id")
             file_content = content.decode('utf-8')
             records = parser_agent.parse_records(file_content, contact_id)
+
+        if not contact_id:
+            raise HTTPException(status_code=400, detail="未提供 contact_id，且文件中未解析到微信ID")
 
         db = Database(config.database.get('path', './data/chathelper.db'))
         new_records = db.insert_new_chat_records(contact_id, records)
@@ -38,7 +48,9 @@ async def upload_chat_records(
             "message": "解析成功",
             "records_count": len(records),
             "new_records_count": len(new_records),
-            "skipped_records_count": len(records) - len(new_records)
+            "skipped_records_count": len(records) - len(new_records),
+            "contact_id": contact_id,
+            "metadata": metadata
         }
 
     except Exception as e:
