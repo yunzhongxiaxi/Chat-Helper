@@ -26,6 +26,8 @@ class EvaluatorService:
         """
         system_prompt = """你是一个回复评估专家。评估推荐回复是否符合用户画像和对话场景。
 
+画像可能包含 current_profile、stable_traits、changed_traits、recent_signals：评估当前回复时优先看 current_profile 和 recent_signals，避免用已经变化的早期特征否定当前风格。
+
 返回 JSON 格式：
 {
     "is_appropriate": true/false,
@@ -87,20 +89,24 @@ class EvaluatorService:
             "contact_id": contact_id,
             "reply": reply,
             "evaluation": evaluation,
-            "user_profile_summary": {
-                "speaking_style": user_profile.get('speaking_style'),
-                "tone": user_profile.get('tone')
-            },
-            "contact_profile_summary": {
-                "relationship": contact_profile.get('relationship'),
-                "tone": contact_profile.get('tone')
-            },
+            "user_profile_summary": self._profile_feedback_summary(
+                user_profile, ['speaking_style', 'tone', 'reply_habits']
+            ),
+            "contact_profile_summary": self._profile_feedback_summary(
+                contact_profile, ['relationship', 'tone', 'speaking_style']
+            ),
             "context": context,
             "user_feedback": user_feedback
         }
 
         with open(self.feedback_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(feedback_entry, ensure_ascii=False) + '\n')
+
+    def _profile_feedback_summary(self, profile: Dict, fields: List[str]) -> Dict:
+        current_profile = profile.get('current_profile', {})
+        summary = {field: current_profile.get(field, profile.get(field)) for field in fields}
+        summary['recent_signals'] = profile.get('recent_signals', [])
+        return summary
 
     def get_feedback_context(self, contact_id: str = None, limit: int = 10) -> str:
         """获取历史反馈作为上下文，用于改进后续生成

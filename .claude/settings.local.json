@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm create *)"
+      "Bash(npm create *)",
+      "Bash(python *)",
+      "Bash(git worktree *)",
+      "Bash(PYTHONIOENCODING=utf-8 python *)"
     ]
   }
 }

@@ -40,22 +40,46 @@ class Database:
 
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_contact_id ON chat_records(contact_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON chat_records(timestamp)')
+        try:
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_records_unique
+                ON chat_records(contact_id, timestamp, sender, message)
+            ''')
+        except sqlite3.IntegrityError:
+            pass
 
         conn.commit()
         conn.close()
 
     def insert_chat_records(self, contact_id: str, records: List[Dict]):
+        self.insert_new_chat_records(contact_id, records)
+
+    def insert_new_chat_records(self, contact_id: str, records: List[Dict]) -> List[Dict]:
         conn = self._get_connection()
         cursor = conn.cursor()
+        inserted_records = []
 
         for record in records:
             cursor.execute('''
-                INSERT INTO chat_records (contact_id, timestamp, sender, message)
+                SELECT 1 FROM chat_records
+                WHERE contact_id = ? AND timestamp = ? AND sender = ? AND message = ?
+                LIMIT 1
+            ''', (contact_id, record['timestamp'], record['sender'], record['message']))
+
+            if cursor.fetchone():
+                continue
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO chat_records (contact_id, timestamp, sender, message)
                 VALUES (?, ?, ?, ?)
             ''', (contact_id, record['timestamp'], record['sender'], record['message']))
 
+            if cursor.rowcount > 0:
+                inserted_records.append(record)
+
         conn.commit()
         conn.close()
+        return inserted_records
 
     def get_chat_records(self, contact_id: str, limit: Optional[int] = None) -> List[Dict]:
         conn = self._get_connection()

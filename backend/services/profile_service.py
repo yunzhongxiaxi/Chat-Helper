@@ -5,6 +5,51 @@ from backend.models.db import Database
 from backend.config import config
 
 class ProfileService:
+    EVOLVING_PROFILE_SCHEMA = """{
+    "user_profile": {
+        "current_profile": {
+            "personality": "当前性格特点",
+            "speaking_style": "当前说话风格",
+            "reply_habits": "当前回复习惯",
+            "interests": "当前关注点/兴趣",
+            "tone": "当前语气特点"
+        },
+        "stable_traits": ["跨时间段反复出现的长期稳定特征"],
+        "changed_traits": [
+            {
+                "field": "变化的字段，如 speaking_style",
+                "from": "早期表现",
+                "to": "近期表现",
+                "period": "可识别的变化时间段",
+                "confidence": "low/medium/high",
+                "evidence": ["支持该变化的聊天表现"]
+            }
+        ],
+        "recent_signals": ["只代表近期状态、应优先影响当前回复的信号"]
+    },
+    "contact_profile": {
+        "current_profile": {
+            "personality": "当前性格特点",
+            "speaking_style": "当前说话风格",
+            "interests": "当前关注点/兴趣",
+            "tone": "当前语气特点",
+            "relationship": "当前与用户的关系"
+        },
+        "stable_traits": ["跨时间段反复出现的长期稳定特征"],
+        "changed_traits": [
+            {
+                "field": "变化的字段，如 tone",
+                "from": "早期表现",
+                "to": "近期表现",
+                "period": "可识别的变化时间段",
+                "confidence": "low/medium/high",
+                "evidence": ["支持该变化的聊天表现"]
+            }
+        ],
+        "recent_signals": ["只代表近期状态、应优先影响当前回复的信号"]
+    }
+}"""
+
     def __init__(self, db: Database):
         self.db = db
         self.ai_client = ai_client
@@ -18,34 +63,26 @@ class ProfileService:
             return self._create_profile(contact_id, records)
 
     def _create_profile(self, contact_id: str, records: List[Dict]) -> Dict:
-        system_prompt = """你是一个人物画像分析专家。基于聊天记录，生成用户和联系人的详细画像。
+        system_prompt = f"""你是一个人物画像分析专家。基于聊天记录，生成能体现时间演变的人物画像。
 
 返回 JSON 格式：
-{
-    "user_profile": {
-        "personality": "性格特点",
-        "speaking_style": "说话风格",
-        "reply_habits": "回复习惯",
-        "interests": "关注点/兴趣",
-        "tone": "语气特点"
-    },
-    "contact_profile": {
-        "personality": "性格特点",
-        "speaking_style": "说话风格",
-        "interests": "关注点/兴趣",
-        "tone": "语气特点",
-        "relationship": "与用户的关系"
-    }
-}"""
+{self.EVOLVING_PROFILE_SCHEMA}
+
+要求：
+1. current_profile 表示当前最适合用于生成回复的人设，近期聊天权重最高
+2. stable_traits 只放跨多个时间段反复出现的稳定特征
+3. changed_traits 记录从早期到近期的明确变化，不要把变化平均成模糊描述
+4. recent_signals 记录近期明显但尚未证明长期稳定的状态
+5. 如果聊天记录时间跨度不足以判断变化，changed_traits 返回空数组"""
 
         chat_text = self._format_records(records)
-        prompt = f"""分析以下聊天记录，生成双方的人物画像：
+        prompt = f"""分析以下按时间排序的聊天记录，生成双方的人物画像：
 
 ```
 {chat_text}
 ```
 
-请生成详细的画像 JSON。"""
+请生成完整画像 JSON。"""
 
         response = self.ai_client.generate(prompt, 'profile_generation', system_prompt)
 
@@ -57,29 +94,34 @@ class ProfileService:
             raise ValueError(f"画像生成失败: {str(e)}")
 
     def _update_profile(self, contact_id: str, new_records: List[Dict], existing_profile: Dict) -> Dict:
-        system_prompt = """你是一个人物画像更新专家。基于新的聊天记录和现有画像，进行增量更新。
+        system_prompt = f"""你是一个人物画像更新专家。你维护的不是静态画像，而是随时间变化的人物画像。
 
 返回 JSON 格式：
-{
-    "user_profile": {...},
-    "contact_profile": {...}
-}
+{self.EVOLVING_PROFILE_SCHEMA}
 
-注意：
-1. 保留原有画像的核心特征
-2. 根据新记录补充或修正细节
-3. 如果新记录显示明显变化，更新相应字段"""
+更新原则：
+1. current_profile 必须优先反映近期聊天中最适合用于当前回复生成的特征
+2. stable_traits 保留被长期反复证明的核心特征，不要因为少量近期记录轻易删除
+3. changed_traits 要显式记录旧特征被削弱、消失、反转或转向的新表现
+4. recent_signals 记录近期明显但还不能证明长期稳定的兴趣、情绪、关系和表达方式
+5. 遇到新旧冲突时，不要平均化；判断它是短期状态、长期转变，还是证据不足
+6. 对已有旧格式画像，先理解其中字段，再升级为新的演变画像结构"""
 
         chat_text = self._format_records(new_records)
         prompt = f"""现有画像：
 {json.dumps(existing_profile, ensure_ascii=False, indent=2)}
 
-新增聊天记录：
+新增聊天记录（按时间排序，代表最新观察）：
 ```
 {chat_text}
 ```
 
-请进行增量更新，返回更新后的完整画像 JSON。"""
+请完成画像更新：
+1. 判断哪些旧特征仍然成立
+2. 判断哪些旧特征被新增记录削弱或修正
+3. 判断哪些新增表现只是近期信号
+4. 判断哪些新增表现构成明确的人物转变
+5. 返回更新后的完整画像 JSON"""
 
         response = self.ai_client.generate(prompt, 'profile_generation', system_prompt)
 

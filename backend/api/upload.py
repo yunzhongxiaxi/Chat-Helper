@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from pathlib import Path
 from backend.services.parser_agent import parser_agent
 from backend.services.profile_service import create_profile_service
 from backend.services.rag_service import create_rag_service
@@ -14,23 +15,30 @@ async def upload_chat_records(
 ):
     try:
         content = await file.read()
-        file_content = content.decode('utf-8')
+        suffix = Path(file.filename or '').suffix.lower()
 
-        records = parser_agent.parse_records(file_content, contact_id)
+        if suffix == '.xlsx':
+            records = parser_agent.parse_xlsx_records(content, contact_id)
+        else:
+            file_content = content.decode('utf-8')
+            records = parser_agent.parse_records(file_content, contact_id)
 
         db = Database(config.database.get('path', './data/chathelper.db'))
-        db.insert_chat_records(contact_id, records)
+        new_records = db.insert_new_chat_records(contact_id, records)
 
-        profile_service = create_profile_service()
-        profile_service.generate_profile(contact_id, records)
+        if new_records:
+            profile_service = create_profile_service()
+            profile_service.generate_profile(contact_id, new_records)
 
-        rag_service = create_rag_service()
-        rag_service.insert_records(contact_id, records)
+            rag_service = create_rag_service()
+            rag_service.insert_records(contact_id, new_records)
 
         return {
             "success": True,
             "message": "解析成功",
-            "records_count": len(records)
+            "records_count": len(records),
+            "new_records_count": len(new_records),
+            "skipped_records_count": len(records) - len(new_records)
         }
 
     except Exception as e:

@@ -33,4 +33,8 @@ class Config:
     def database(self) -> dict:
         return self._config.get('database', {})
 
+    @property
+    def mcp_servers(self) -> dict:
+        return self._config.get('mcp_servers', {})
+
 config = Config()

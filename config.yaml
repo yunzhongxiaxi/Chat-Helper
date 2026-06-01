@@ -39,3 +39,11 @@ lightrag:
 # 数据库配置
 database:
   path: "./data/chathelper.db"
+
+# MCP 工具服务器配置
+mcp_servers:
+  brave-search:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-brave-search"]
+    env:
+      BRAVE_API_KEY: "your-brave-api-key"

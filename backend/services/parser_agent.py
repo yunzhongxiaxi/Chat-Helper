@@ -1,8 +1,11 @@
 from typing import List, Dict, Optional
 import json
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+from io import BytesIO
 from backend.services.ai_client import ai_client
 
 class ParserAgent:
@@ -10,6 +13,108 @@ class ParserAgent:
         self.ai_client = ai_client
         self.parsers_cache_dir = Path("./data/parsers")
         self.parsers_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def parse_xlsx_records(self, file_content: bytes, contact_id: str) -> List[Dict]:
+        rows = self._read_xlsx_rows(file_content)
+        header_index = self._find_xlsx_header(rows)
+        if header_index is None:
+            raise ValueError("未找到 XLSX 聊天记录表头")
+
+        headers = {value.strip(): index for index, value in enumerate(rows[header_index]) if value.strip()}
+        time_col = headers.get('时间')
+        sender_col = headers.get('发送者身份')
+        message_col = headers.get('内容')
+
+        if time_col is None or sender_col is None or message_col is None:
+            raise ValueError("XLSX 缺少必要列：时间、发送者身份、内容")
+
+        records = []
+        for row in rows[header_index + 1:]:
+            timestamp = self._xlsx_cell(row, time_col)
+            sender_name = self._xlsx_cell(row, sender_col)
+            message = self._xlsx_cell(row, message_col)
+
+            if not timestamp or not sender_name or not message:
+                continue
+
+            records.append({
+                "timestamp": timestamp,
+                "sender": "user" if sender_name.strip() in ["我", "Me", "user", "User"] else "contact",
+                "message": message.strip()
+            })
+
+        if not records:
+            raise ValueError("XLSX 中未解析出聊天记录")
+
+        print(f"✓ 使用内置 XLSX 解析器成功解析 {len(records)} 条记录（零 LLM 调用）")
+        return records
+
+    def _read_xlsx_rows(self, file_content: bytes) -> List[List[str]]:
+        namespace = {'a': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+        with zipfile.ZipFile(BytesIO(file_content)) as workbook:
+            shared_strings = self._read_shared_strings(workbook, namespace)
+            sheet_path = self._first_sheet_path(workbook)
+            sheet = ET.fromstring(workbook.read(sheet_path))
+
+        rows = []
+        for row_node in sheet.findall('.//a:sheetData/a:row', namespace):
+            values = []
+            for cell in row_node.findall('a:c', namespace):
+                column_index = self._xlsx_column_index(cell.attrib.get('r', 'A'))
+                while len(values) <= column_index:
+                    values.append('')
+                values[column_index] = self._xlsx_cell_text(cell, shared_strings, namespace)
+            rows.append(values)
+        return rows
+
+    def _read_shared_strings(self, workbook: zipfile.ZipFile, namespace: Dict[str, str]) -> List[str]:
+        if 'xl/sharedStrings.xml' not in workbook.namelist():
+            return []
+
+        root = ET.fromstring(workbook.read('xl/sharedStrings.xml'))
+        strings = []
+        for item in root.findall('a:si', namespace):
+            strings.append(''.join(text.text or '' for text in item.findall('.//a:t', namespace)))
+        return strings
+
+    def _first_sheet_path(self, workbook: zipfile.ZipFile) -> str:
+        if 'xl/worksheets/sheet1.xml' in workbook.namelist():
+            return 'xl/worksheets/sheet1.xml'
+        for name in workbook.namelist():
+            if name.startswith('xl/worksheets/') and name.endswith('.xml'):
+                return name
+        raise ValueError("XLSX 中未找到工作表")
+
+    def _xlsx_cell_text(self, cell: ET.Element, shared_strings: List[str], namespace: Dict[str, str]) -> str:
+        value = cell.find('a:v', namespace)
+        if value is not None:
+            text = value.text or ''
+            if cell.attrib.get('t') == 's' and text:
+                return shared_strings[int(text)]
+            return text
+
+        inline_string = cell.find('a:is', namespace)
+        if inline_string is not None:
+            return ''.join(text.text or '' for text in inline_string.findall('.//a:t', namespace))
+        return ''
+
+    def _xlsx_column_index(self, cell_ref: str) -> int:
+        column_name = re.match(r'[A-Z]+', cell_ref).group(0)
+        index = 0
+        for char in column_name:
+            index = index * 26 + ord(char) - ord('A') + 1
+        return index - 1
+
+    def _find_xlsx_header(self, rows: List[List[str]]) -> Optional[int]:
+        required_headers = {'时间', '发送者身份', '内容'}
+        for index, row in enumerate(rows):
+            if required_headers.issubset({cell.strip() for cell in row}):
+                return index
+        return None
+
+    def _xlsx_cell(self, row: List[str], index: int) -> str:
+        return row[index].strip() if index < len(row) else ''
 
     def parse_records(self, file_content: str, contact_id: str) -> List[Dict]:
         """解析聊天记录，优先使用硬编码规则，失败时回退到 LLM"""
