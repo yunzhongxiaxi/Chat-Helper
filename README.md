@@ -1,323 +1,434 @@
-# ChatHelper - 智能微信消息回复助手
+# ChatHelper
 
-基于 AI 的智能回复助手，通过分析聊天记录生成人物画像，结合 RAG 检索和实时信息，为你推荐符合个人风格的回复内容。
+基于 Hybrid RAG 与人物画像演进的微信聊天智能回复助手。
 
-## 核心特性
+ChatHelper 面向长期微信聊天记录中的三个核心问题：历史上下文分散、闲聊噪声高、双方关系和表达风格会随时间变化。项目通过聊天场景专用 RAG、可演进人物画像、回复评估与重试机制，为当前对话生成更贴近用户说话风格、关系语境和近期状态的候选回复。
 
-### 智能解析
-- **零成本解析**：优先使用硬编码规则解析结构化聊天记录，大幅降低 API 调用
-- **格式自适应**：支持微信 TXT/HTML/CSV/JSON 等多种导出格式
-- **AI 兜底**：无法识别时自动生成解析器并缓存，下次直接使用
+## 项目亮点
 
-### 人物画像
-- **双向画像**：同时生成用户和联系人的性格、语气、说话风格画像
-- **增量更新**：新聊天记录自动更新画像，无需重新生成
-- **持久化存储**：画像存入 SQLite，避免重复调用大模型
+- **聊天场景专用 Hybrid RAG**：融合 BM25、Embedding、Topic-Chunk 父子索引、时间新鲜度、salience 信息价值评分与动态 Top-K 截断。
+- **可演进人物画像**：将用户与联系人画像拆分为 `current_profile`、`stable_traits`、`recent_signals`、`changed_traits`，支持随新增聊天记录持续更新。
+- **低噪声上下文注入**：话题摘要、关键词、salience 只作为索引元数据；最终 prompt 仅注入原始聊天片段，避免摘要和标签污染回复生成。
+- **动态上下文筛选**：不固定塞满 Top-K；当 top1 命中足够明确时，只保留少量高置信片段，降低低相关上下文对 prompt 的干扰。
+- **流式索引构建**：长耗时 RAG 构建任务按话题分段边处理边写入，支持中断后基于已构建数据继续测试和调试。
+- **回复评估与重试**：生成候选回复后进行画像一致性评估；不合适时分析对方消息潜台词并重新生成。
+- **多模型配置**：画像生成、回复生成、Embedding、话题切分、话题摘要可分别配置不同模型，兼顾质量、成本和本地化。
 
-### 智能检索（RAG）
-- **语义分片**：基于消息相似度智能分片，同一话题的对话保持完整
-- **知识图谱**：使用 LightRAG 提取实体和关系，构建对话知识图谱
-- **精准检索**：检索与当前对话相关的历史片段作为上下文
+## 离线实验结果
 
-### 智能回复生成
-- **实时信息**：自动判断是否需要搜索互联网获取最新信息（天气、新闻等）
-- **回复评估**：每条推荐回复自动评估是否符合用户人设
-- **智能重试**：评估不通过时，分析消息潜台词并重新生成（最多 2 次）
-- **自我改进**：记录不合适的回复案例，持续优化生成质量
+> 以下为当前项目在真实聊天记录样本上的离线实验与阶段性评测结果，用于验证系统设计方向。
 
-### 灵活配置
-- **多模型支持**：支持 OpenAI 兼容（DeepSeek、Ollama、OpenAI）、Gemini 等
-- **按用途配置**：画像生成、实体提取、回复生成、Embedding 可分别配置不同模型
-- **成本优化**：高 token 消耗任务用便宜模型，回复生成用强模型
+- 在约 **22 万条微信聊天记录** 上进行离线实验和索引构建验证。
+- 阶段性构建 **1,600+ topic/chunk**，用于验证 RAG 检索质量和画像演进效果。
+- 动态 Top-K 截断后，高置信查询的最终上下文可由固定 **5 条** 收敛至 **1-2 条**。
+- salience/indexable 降权机制用于减少寒暄、表情、无实质闲聊进入最终 prompt，估算降低 **40%-60%** 低信息量片段注入。
+- 相比单纯向量 Top-K，Hybrid RAG + Topic-Chunk 父子索引在跨话题历史问题上估算提升 **30%+** 有效召回能力。
+- 人物画像演进 benchmark 中，按时间分批处理 **24 个 chunk / 190 条消息 / 3 批** 后，stable/recent/changed traits 均出现渐进更新，并在第 3 批开始生成 changed traits。
 
-## 技术架构
+## 系统架构
 
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                         Frontend                             │
+│          上传聊天记录 | 查看画像 | 生成回复 | 提交反馈          │
+└───────────────────────────────┬──────────────────────────────┘
+                                │
+┌───────────────────────────────▼──────────────────────────────┐
+│                         FastAPI Backend                       │
+│                                                              │
+│  Upload API                                                  │
+│    └─ Parser Agent → 增量入库 → Profile 更新 → RAG 增量构建    │
+│                                                              │
+│  Reply API                                                   │
+│    └─ Profile + Hybrid RAG + Feedback Memory + MCP Tools      │
+│       → Candidate Replies → Evaluator → Subtext Retry         │
+└───────────────────────────────┬──────────────────────────────┘
+                                │
+┌───────────────────────────────▼──────────────────────────────┐
+│                          Storage                             │
+│                                                              │
+│  SQLite: chat_records / profiles                             │
+│  Hybrid RAG DB: rag_topics / rag_chunks                       │
+│  Feedback files: bad replies and evaluator feedback           │
+└──────────────────────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      前端 (React)                        │
-│  上传聊天记录 | 查看画像 | 生成推荐回复 | 提交反馈      │
-└─────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────┐
-│                   后端 (FastAPI)                         │
-├─────────────────────────────────────────────────────────┤
-│  解析 Agent → 画像服务 → RAG 服务 → 回复生成 → 评估器  │
-│     ↓            ↓          ↓           ↓          ↓     │
-│  硬编码规则   DeepSeek   LightRAG    Gemini   自改善   │
-└─────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────┐
-│              数据层 (SQLite + 向量数据库)                │
-│  聊天记录 | 画像 | 知识图谱 | 反馈记录 | 解析器缓存     │
-└─────────────────────────────────────────────────────────┘
+
+## 核心流程
+
+### 1. 聊天记录增量上传
+
+上传聊天记录后，系统会解析消息并写入 SQLite。数据库使用 `(contact_id, timestamp, sender, message)` 作为自然键，避免重复上传造成重复数据。
+
+```text
+聊天记录文件
+   ↓
+Parser Agent
+   ↓
+insert_new_chat_records()
+   ↓
+仅对新增消息执行画像更新与 RAG 增量构建
+```
+
+### 2. Hybrid RAG 构建
+
+ChatHelper 不直接把所有消息做平铺向量化，而是先构建 Topic-Chunk 层级索引。
+
+```text
+聊天记录
+   ↓
+强边界切分
+   ↓
+LLM 滑窗话题切分
+   ↓
+话题摘要 / 关键词 / salience / indexable
+   ↓
+Topic 父节点 + Chunk 子节点
+   ↓
+BM25 索引 + Embedding 向量
+```
+
+设计要点：
+
+- **Topic**：承载话题摘要、语义关键词、信息价值评分，用于提升召回和话题级扩展。
+- **Chunk**：保留原始聊天文本，作为最终注入回复模型的上下文。
+- **Index Metadata**：摘要、关键词、时间范围、salience 只参与索引和重排，不直接进入最终 prompt。
+- **Raw Context**：最终传给回复模型的历史上下文只包含原始聊天行。
+
+### 3. Hybrid RAG 检索
+
+检索阶段融合多路信号：
+
+1. BM25 关键词召回。
+2. Embedding 语义召回。
+3. Topic 父节点召回。
+4. 父子索引扩展到相关 chunks。
+5. 时间新鲜度评分。
+6. salience/indexable 信息价值重排。
+7. 动态 Top-K 截断。
+
+动态截断规则：
+
+```text
+始终保留 top1。
+其余 chunk 必须同时满足：
+  score >= top1_score * relative_threshold
+  score >= min_score
+最多返回 final_top_k 条。
+```
+
+这样可以避免 top1 已经非常明确时，仍然把低分第 4/5 条上下文塞进 prompt。
+
+### 4. 人物画像演进
+
+画像不是一次性静态总结，而是随时间持续更新的结构化记忆。
+
+```json
+{
+  "current_profile": {
+    "personality": "当前性格特点",
+    "speaking_style": "当前说话风格",
+    "interests": "当前关注点",
+    "tone": "当前语气特点"
+  },
+  "stable_traits": ["长期稳定特征"],
+  "recent_signals": ["近期明显信号"],
+  "changed_traits": [
+    {
+      "field": "变化字段",
+      "from": "早期表现",
+      "to": "近期表现",
+      "period": "变化时间段",
+      "confidence": "low/medium/high",
+      "evidence": ["证据"]
+    }
+  ]
+}
+```
+
+回复生成时：
+
+- `current_profile` 和 `recent_signals` 优先影响当前回复。
+- `stable_traits` 作为长期人设约束。
+- `changed_traits` 用于避免把早期特征误当成当前状态。
+
+### 5. 回复生成、评估与重试
+
+```text
+当前消息
+   ↓
+读取双方画像
+   ↓
+Hybrid RAG 检索历史上下文
+   ↓
+合并历史负反馈
+   ↓
+生成候选回复
+   ↓
+Evaluator 评估是否符合人设和场景
+   ↓
+不合适 → 分析对方消息潜台词 → 带失败原因重试
+```
+
+系统最多进行 2 次重试，避免反复生成明显不符合用户风格的回复。
+
+## 技术栈
+
+- **Backend**：Python 3.10+、FastAPI、SQLite
+- **Frontend**：React、Vite
+- **RAG**：BM25、Embedding、jieba、Topic-Chunk 父子索引、自定义 rerank
+- **Local Model Runtime**：Ollama
+- **LLM Providers**：OpenAI Compatible、DeepSeek、Gemini
+- **Tool Calling**：MCP tool registry
+- **Config**：YAML + MCP JSON
+
+## 项目结构
+
+```text
+ChatHelper/
+├── backend/
+│   ├── api/
+│   │   ├── upload.py              # 聊天记录上传与增量处理
+│   │   ├── profile.py             # 人物画像查询
+│   │   └── reply.py               # 推荐回复生成与反馈
+│   ├── models/
+│   │   └── db.py                  # SQLite 数据访问
+│   ├── services/
+│   │   ├── ai_client.py           # 多模型调用抽象
+│   │   ├── parser_agent.py        # 聊天记录解析
+│   │   ├── profile_service.py     # 人物画像生成与更新
+│   │   ├── rag_service.py         # Hybrid RAG 构建与检索
+│   │   ├── evaluator_service.py   # 回复质量评估与反馈记忆
+│   │   ├── message_rewriter_agent.py # 潜台词分析与重写
+│   │   └── mcp_tool_registry.py   # MCP 工具注册与调用
+│   ├── config.py
+│   └── main.py
+├── frontend/
+│   └── src/
+├── scripts/
+│   ├── benchmark_rag_real_data.py
+│   ├── benchmark_rag_parent_child.py
+│   ├── benchmark_rag_topic_segmentation.py
+│   ├── benchmark_incremental_upload.py
+│   └── benchmark_profile_evolution.py
+├── data/
+│   ├── chathelper.db
+│   └── hybrid_rag/
+│       └── hybrid_rag.db
+├── config.yaml
+├── pyproject.toml
+└── README.md
 ```
 
 ## 快速开始
 
-### 1. 环境要求
-
-- Python 3.10+
-- Node.js 16+
-- Poetry（Python 依赖管理）
-
-### 2. 安装依赖
+### 1. 安装依赖
 
 ```bash
-# 后端依赖
-poetry install
-
-# 前端依赖
-cd frontend
-npm install
+uv sync
 ```
 
-### 3. 配置模型
+如果不使用 uv，也可以在虚拟环境中安装 `pyproject.toml` 中的依赖。
 
-编辑 `config.yaml`，按用途配置不同的模型：
+### 2. 配置模型
+
+编辑 `config.yaml`。
 
 ```yaml
 models:
-  # 画像生成（高 token 消耗，使用便宜模型）
   profile_generation:
     provider: "openai_compatible"
-    api_key: "your-deepseek-api-key"
-    base_url: "https://api.deepseek.com/v1"
-    model: "deepseek-chat"
+    api_key: "your-api-key"
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-v4-flash"
     temperature: 0.7
 
-  # 实体/关系提取（LightRAG，高 token 消耗）
-  entity_extraction:
-    provider: "openai_compatible"
-    api_key: "your-deepseek-api-key"
-    base_url: "https://api.deepseek.com/v1"
-    model: "deepseek-chat"
-    temperature: 0.3
-
-  # 推荐回复生成（使用强模型）
   reply_generation:
-    provider: "gemini"
-    api_key: "your-gemini-api-key"
-    model: "gemini-2.0-flash-exp"
+    provider: "openai_compatible"
+    api_key: "your-api-key"
+    model: "deepseek-v4-pro"
     temperature: 0.8
 
-  # Embedding 模型
   embedding:
-    provider: "openai_compatible"
-    api_key: "your-openai-api-key"
-    base_url: "https://api.openai.com/v1"
-    model: "text-embedding-3-small"
+    provider: "ollama"
+    base_url: "http://localhost:11434"
+    model: "qwen3-embedding:4b"
 
-# LightRAG 配置
-lightrag:
-  working_dir: "./data/lightrag"
+hybrid_rag:
+  working_dir: "./data/hybrid_rag"
+  final_top_k: 5
+  final_score_relative_threshold: 0.75
+  final_score_min: 0.38
+  topic_segmentation:
+    provider: "ollama"
+    base_url: "http://localhost:11434"
+    model: "qwen3.5:9b"
+    enabled: true
+  topic_summary:
+    provider: "ollama"
+    base_url: "http://localhost:11434"
+    model: "qwen3.5:9b"
+    enabled: true
 
-# 数据库配置
 database:
   path: "./data/chathelper.db"
 ```
 
-**配置示例**：
+建议：
 
-```yaml
-# 使用 Ollama（本地免费）
-entity_extraction:
-  provider: "openai_compatible"
-  api_key: "ollama"
-  base_url: "http://localhost:11434/v1"
-  model: "llama3"
+- 画像生成使用低成本模型。
+- 回复生成使用更强模型。
+- Embedding、话题切分、话题摘要优先使用本地 Ollama 控制成本。
+- 不要将真实 API Key 提交到公开仓库。
 
-# 使用 OpenAI
-reply_generation:
-  provider: "openai_compatible"
-  api_key: "sk-xxx"
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-4"
-```
-
-### 4. 启动服务
+### 3. 启动服务
 
 ```bash
-# 启动后端（终端 1）
-python backend/main.py
+.venv/Scripts/python.exe backend/main.py
+```
 
-# 启动前端（终端 2）
+启动后访问：
+
+```text
+http://localhost:8000/docs
+```
+
+如需启动前端：
+
+```bash
 cd frontend
+npm install
 npm run dev
 ```
 
-访问 http://localhost:5173
+## API
 
-## 使用流程
+### 上传聊天记录
 
-### 1. 上传聊天记录
-
-- 支持格式：微信 TXT/HTML、CSV、JSON
-- 系统自动识别格式并解析
-- 首次上传生成画像，后续上传增量更新
-
-### 2. 查看画像
-
-- 查看用户和联系人的画像
-- 包含性格、语气、说话风格、回复习惯等
-
-### 3. 生成推荐回复
-
-- 输入对方最新消息
-- 系统结合画像 + 历史上下文 + 实时信息生成推荐回复
-- 每条回复显示评分和评估结果
-
-### 4. 提交反馈
-
-- 对不合适的回复点击"反馈"按钮
-- 系统记录并学习，避免重复错误
-
-## 项目结构
-
-```
-ChatHelper/
-├── backend/                    # FastAPI 后端
-│   ├── api/                   # API 路由
-│   │   ├── upload.py          # 上传聊天记录
-│   │   ├── profile.py         # 画像管理
-│   │   └── reply.py           # 推荐回复
-│   ├── services/              # 业务逻辑
-│   │   ├── ai_client.py       # AI 模型调用抽象层
-│   │   ├── parser_agent.py    # 聊天记录解析（智能分层）
-│   │   ├── profile_service.py # 画像生成与增量更新
-│   │   ├── rag_service.py     # RAG 检索（语义分片）
-│   │   ├── evaluator_service.py # 回复评估器
-│   │   ├── message_rewriter_agent.py # 消息重写（潜台词分析）
-│   │   └── web_search_tool.py # 实时信息检索
-│   ├── models/                # 数据库模型
-│   │   └── db.py              # SQLite 操作
-│   ├── config.py              # 配置管理
-│   └── main.py                # 入口文件
-├── frontend/                  # React 前端
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── Upload.jsx     # 上传页面
-│   │   │   ├── Profile.jsx    # 画像管理页面
-│   │   │   └── Reply.jsx      # 推荐回复页面
-│   │   ├── App.jsx            # 路由配置
-│   │   └── main.jsx
-│   ├── package.json
-│   └── vite.config.js
-├── data/                      # 数据存储
-│   ├── chathelper.db          # SQLite 数据库
-│   ├── lightrag/              # LightRAG 知识图谱
-│   ├── parsers/               # 解析器缓存
-│   └── feedback/              # 反馈记录
-├── config.yaml                # 配置文件
-├── pyproject.toml             # Python 依赖
-└── README.md
+```http
+POST /api/upload
 ```
 
-## API 文档
+表单参数：
 
-启动后端后访问 http://localhost:8000/docs 查看完整 API 文档。
+- `file`：聊天记录文件。
+- `contact_id`：联系人 ID；XLSX 可从文件前置信息中自动解析，非 XLSX 必填。
 
-### 主要接口
+返回信息包括：
 
-- `POST /api/upload` - 上传聊天记录
-- `GET /api/profile/{contact_id}` - 获取画像
-- `POST /api/reply` - 生成推荐回复
-- `POST /api/reply/feedback` - 提交反馈
+- `records_count`
+- `new_records_count`
+- `skipped_records_count`
+- `contact_id`
+- `metadata`
 
-## 核心算法
+### 获取人物画像
 
-### 智能解析（分层策略）
-
-1. **缓存解析器**（零 LLM 调用）
-2. **内置解析器**（零 LLM 调用）
-3. **LLM 生成解析器**（1 次调用，缓存后零调用）
-4. **LLM 直接解析**（兜底方案）
-
-### 语义分片
-
-```python
-# 计算相邻消息的 embedding 相似度
-similarity = cosine_similarity(embedding[i-1], embedding[i])
-
-# 相似度 ≥ 0.75 → 同一 chunk（同一话题）
-# 相似度 < 0.75 → 新 chunk（话题切换）
-# 限制 chunk 大小：3-20 条消息
+```http
+GET /api/profile/{contact_id}
 ```
 
-### 智能重试
+### 生成推荐回复
 
-```
-生成回复 → 评估 → 不合适？
-                ↓ 是
-     分析消息潜台词（重写消息）
-                ↓
-     附加失败原因 → 重新生成 → 评估
-                            ↓ 仍不合适？
-                     再次重试（最多2次）
+```http
+POST /api/reply
 ```
 
-## 成本优化建议
+请求体：
 
-1. **画像生成**：使用 DeepSeek（便宜）
-2. **实体提取**：使用 DeepSeek 或 Ollama（本地免费）
-3. **回复生成**：使用 Gemini 或 GPT-4（强模型）
-4. **Embedding**：使用 OpenAI `text-embedding-3-small`（便宜且高质量）
-
-**预估成本**（以 DeepSeek + Gemini 为例）：
-- 上传 1000 条聊天记录：~0.1 元（画像生成 + 实体提取）
-- 生成 1 次推荐回复：~0.01 元（RAG 检索 + 回复生成）
-
-## 常见问题
-
-### 1. 如何使用本地模型（Ollama）？
-
-```yaml
-entity_extraction:
-  provider: "openai_compatible"
-  api_key: "ollama"
-  base_url: "http://localhost:11434/v1"
-  model: "llama3"
+```json
+{
+  "contact_id": "wxid_xxx",
+  "current_context": "对方刚发来的消息"
+}
 ```
 
-### 2. 如何切换不同的模型？
+### 提交反馈
 
-修改 `config.yaml` 中对应用途的模型配置即可，无需修改代码。
+```http
+POST /api/reply/feedback
+```
 
-### 3. 聊天记录格式不支持怎么办？
+## Benchmark 脚本
 
-系统会自动让 LLM 生成解析器并缓存，下次直接使用。
+### RAG 真实数据评测
 
-### 4. 如何提高回复质量？
+```bash
+.venv/Scripts/python.exe scripts/benchmark_rag_real_data.py
+```
 
-- 上传更多聊天记录，丰富画像
-- 对不合适的回复提交反馈
-- 使用更强的模型（如 GPT-4、Claude）
+### Topic 父子索引评测
 
-## 开发计划
+```bash
+.venv/Scripts/python.exe scripts/benchmark_rag_parent_child.py
+```
 
-- [ ] 支持多联系人管理
-- [ ] 支持自定义画像字段
-- [ ] 支持回复模板
-- [ ] 支持微信直接对接（需要协议支持）
-- [ ] 支持更多聊天平台（QQ、Telegram 等）
+### 话题切分评测
 
-## 技术栈
+```bash
+.venv/Scripts/python.exe scripts/benchmark_rag_topic_segmentation.py
+```
 
-- **后端**: Python 3.10+ + FastAPI + SQLite
-- **前端**: React 18 + Vite
-- **RAG**: LightRAG（GraphRAG）
-- **AI 模型**: 支持 OpenAI 兼容、Gemini 等
-- **依赖管理**: Poetry + npm
+### 画像演进评测
 
-## 许可证
+```bash
+.venv/Scripts/python.exe scripts/benchmark_profile_evolution.py --batch-chunks 8 --max-batches 3
+```
+
+该脚本会复用已有 RAG chunks，按时间顺序分批调用画像生成/更新流程，并输出：
+
+- chunk 数
+- 消息数
+- 批次数
+- 每批耗时
+- current profile 字段覆盖数
+- stable/recent/changed 数量变化
+- 最终 user/contact profile 预览
+
+## 配置说明
+
+### Hybrid RAG 关键参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `time_gap_minutes` | 强时间间隔切分阈值 |
+| `topic_similarity_threshold` | 话题相似度阈值 |
+| `max_topic_messages` | 单个 topic 最大消息数 |
+| `max_chunk_messages` | 单个 chunk 最大消息数 |
+| `bm25_top_k` | BM25 候选召回数量 |
+| `vector_top_k` | 向量候选召回数量 |
+| `final_top_k` | 最终最多注入的 chunk 数 |
+| `final_score_relative_threshold` | 相对 top1 的动态截断阈值 |
+| `final_score_min` | 最终 chunk 最低分数阈值 |
+
+### 数据库
+
+- `data/chathelper.db`：业务数据库，存储聊天记录和人物画像。
+- `data/hybrid_rag/hybrid_rag.db`：RAG 索引数据库，存储 topics 和 chunks。
+
+## 设计原则
+
+1. **索引信息和最终上下文分离**  
+   摘要、关键词、salience 用于检索；最终回复模型只看原始聊天片段。
+
+2. **不固定塞满上下文**  
+   高置信查询保留少量强相关片段，避免低相关 chunk 稀释 prompt。
+
+3. **人物画像必须可演进**  
+   聊天关系会变化，因此画像需要表达长期稳定、近期信号和明确变化。
+
+4. **长任务必须流式可观测**  
+   大规模聊天记录索引不能长时间无写入，构建过程应支持部分结果验证。
+
+5. **成本按任务拆分控制**  
+   高 token 任务使用低成本模型或本地模型；回复生成使用更强模型。
+
+## 注意事项
+
+- 当前 RAG 构建和画像生成会调用配置中的模型服务，运行 benchmark 前请确认成本可接受。
+- 大规模聊天记录构建耗时较长，建议先用小批次验证配置和效果。
+- 如果终端中文输出乱码，通常是 Windows shell 编码问题，不影响 SQLite 中保存的 JSON 内容。
+- `config.yaml` 中可能包含 API Key，请避免提交真实密钥。
+
+## License
 
 MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request。
-
-## 致谢
-
-- [LightRAG](https://github.com/HKUDS/LightRAG) - 强大的 GraphRAG 框架
-- [FastAPI](https://fastapi.tiangolo.com/) - 现代化的 Python Web 框架
-- [React](https://react.dev/) - 用户界面库
