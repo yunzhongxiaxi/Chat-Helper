@@ -1,5 +1,6 @@
 from typing import Dict, List
 import json
+import re
 from backend.services.ai_client import ai_client
 from backend.models.db import Database
 from backend.config import config
@@ -87,7 +88,7 @@ class ProfileService:
         response = self.ai_client.generate(prompt, 'profile_generation', system_prompt)
 
         try:
-            profiles = json.loads(response)
+            profiles = self._parse_profile_response(response)
             self.db.upsert_profile(contact_id, profiles['user_profile'], profiles['contact_profile'])
             return profiles
         except (json.JSONDecodeError, KeyError) as e:
@@ -126,11 +127,23 @@ class ProfileService:
         response = self.ai_client.generate(prompt, 'profile_generation', system_prompt)
 
         try:
-            profiles = json.loads(response)
+            profiles = self._parse_profile_response(response)
             self.db.upsert_profile(contact_id, profiles['user_profile'], profiles['contact_profile'])
             return profiles
         except (json.JSONDecodeError, KeyError) as e:
             raise ValueError(f"画像更新失败: {str(e)}")
+
+    def _parse_profile_response(self, response: str) -> Dict:
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
+            if match:
+                return json.loads(match.group(1))
+            match = re.search(r"\{.*\}", response, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            raise
 
     def _format_records(self, records: List[Dict]) -> str:
         lines = []

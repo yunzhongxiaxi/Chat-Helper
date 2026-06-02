@@ -9,7 +9,16 @@
       "Bash(command -v uv)",
       "Bash(uv --version)",
       "Bash(command -v uvx)",
-      "Bash(uvx --version)"
+      "Bash(uvx --version)",
+      "Bash(.venv/Scripts/python.exe -m py_compile scripts/benchmark_incremental_upload.py)",
+      "Bash(.venv/Scripts/python.exe scripts/benchmark_incremental_upload.py)",
+      "Bash(uv run *)",
+      "Bash(PYTHONIOENCODING=utf-8 uv run *)",
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(UV_LINK_MODE=copy uv add *)",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe *)",
+      "Bash(ollama list *)",
+      "Bash(ollama ps *)"
     ]
   }
 }
